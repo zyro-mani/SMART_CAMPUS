@@ -1,0 +1,64 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isAdminOrHod() {
+      return isAuthenticated() && (
+        getUserData().role in ['admin', 'hod'] ||
+        (getUserData().designation != null && (
+          getUserData().designation.lower().matches('.*hod.*') ||
+          getUserData().designation.lower().matches('.*head of department.*')
+        ))
+      );
+    }
+
+    // ------------------------------------------------------------
+    // FACE REGISTRATION STATUS (METADATA LOCK & ADMIN RESET)
+    // ------------------------------------------------------------
+    match /face_registration_status/{studentUid} {
+      // Allow student to read their own status, or Admin/HOD/Faculty to read
+      allow read: if isAuthenticated() && (
+        request.auth.uid == studentUid ||
+        isAdminOrHod() ||
+        getUserData().role == 'faculty'
+      );
+
+      // Student can create their lock ONLY ONCE when doc does not exist
+      allow create: if isAuthenticated() && request.auth.uid == studentUid
+                    && !exists(/databases/$(database)/documents/face_registration_status/$(studentUid))
+                    && request.resource.data.isRegistered == true
+                    && request.resource.data.keys().hasOnly(['isRegistered', 'requiresReEnrollment', 'registerNo', 'deviceId', 'registeredAt']);
+
+      // Students CANNOT update isRegistered to false or unlock themselves.
+      // ONLY Admin or HOD can perform an update/reset.
+      allow update: if isAdminOrHod();
+
+      // Delete allowed only by Admin or HOD
+      allow delete: if isAdminOrHod();
+    }
+
+    // ------------------------------------------------------------
+    // FACE RESET AUDIT LOGS
+    // ------------------------------------------------------------
+    match /face_reset_logs/{logId} {
+      allow read: if isAdminOrHod();
+      allow create: if isAdminOrHod();
+      allow update, delete: if false; // Immutable audit log
+    }
+
+    // Default rules for other app collections
+    match /{document=**} {
+      allow read, write: if isAuthenticated();
+    }
+  }
+}
+
